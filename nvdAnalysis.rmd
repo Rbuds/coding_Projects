@@ -1,0 +1,162 @@
+---
+title: "Vulnerability Analysis w/2nd-Order Regression"
+author: "Ryan Budnik"
+output:
+  word_document: default
+  docx_document: default
+---
+
+```{r}
+knitr::opts_chunk$set(echo=TRUE)
+```
+
+## Read-in Prep Data
+This routine reads in the data I previously formatted and also appends a running total of the number of vulnerabilities. Although the NVD provides a "date published" for each CVE, my input assesses the number of CVE added per month so they must be readded to the total.
+```{r}
+library(readxl)
+data <- read_excel("nvd_data.xlsx")
+data <- head(data, -1)
+data$Total <- cumsum(data$Count) #Append running total column
+data$Count <- as.numeric(data$Count)
+data$color <- "Black"
+```
+
+## Sample Data
+To prepare this data even before getting to this stage, I used a Python script to pull and format the NVD data from json into a csv. I then used an Alteryx workflow to further format and group entries accordingly. You can see the Index value is just the number of months since 00/0000 that I use to put records in sequential order.
+```{r}
+head(data, 10)
+```
+
+## Plot Running Total
+Below you can see the result of the running total column. You will notice what I did when I first looked at this data; it is growing which was expected but more importantly it is growing at an exponential rate. My next question was to look at the month over month additions.
+```{r}
+plot(data$Index, data$Total, col=data$color, pch=20, xlab="Month Index", ylab="Total Vulnerabilities", main="Total Vulnerabilities by Time")
+```
+
+## Plot Derivative
+Below you can see a chart looking only at the number of CVEs added month over month. A stand out point is to note that research was quite busy during Index=24209 which translates to May of 2017. During this month there were 4155 CVEs added to the NVD. 
+```{r}
+plot(data$Index, data$Count, col=data$color, pch=20, xlab="Month Index", ylab="Vulnerabilities per Month", main="Vulnerability Addition Rates")
+```
+
+## Bootstrap to Optimize Timeframe for R-Squared
+This routine takes the derivative plot previously shown and iterates through different timeframes. Where the previous charts use all possible months, this routines looks at sub-timeframes from current going back in time matching a linear regression to each timeframe and cataloging the r-squared value. It will then find which timeframe from current backwards yields the best fit regression and return that timeframe.
+```{r}
+bootstrap <- function() {
+  errors <- c()
+  range <- data$Index
+  for (i in range) {
+    truncData <- data[ which(data$Index >= i), ]
+    truncData$Index <- truncData$Index - i # Re-anchor the x-axis
+    model <- lm(truncData$Count ~ truncData$Index)
+    adjR <- summary(model)$adj.r.squared
+    errors <- c(errors, adjR)
+  }
+  errors <- head(errors, -3)
+  maxRsqrI <- which(errors == max(errors))
+  maxRsqrI <- maxRsqrI + min(range)
+  return(maxRsqrI)
+}
+```
+
+## Plot Optimized Timeframe
+Using the bootstrapped timeframe previously explained, you can see that the best linear regression is found when the earliest hald-dozen or so months are omitted from calculation. You can see how this looks in the running total and derivative charts as well below.
+```{r}
+iBreak <- bootstrap()
+data$color[data$Index < iBreak]="Red"
+plot(data$Index, data$Total, col=data$color, pch=20, xlab="Month Index", ylab="Total Vulns", main="Total Vulns Over Time")
+plot(data$Index, data$Count, col=data$color, pch=20, xlab="Month Index", ylab="Vulns per Month", main="Vuln. Addition Rates")
+```
+
+## Model Optimized Derivative Data
+I will now use the optimized timeframe and rechart the derivative graph to show you the linear regression details as well as where the linear regression line fits on top of the chart. You will notice the y-intercept is negative which doesn't make sense in context however the key piece here is the slope. According to this model, almost 4 more CVEs are added every month compared to the number added the previous month. This means the rate at which additions are being made is increasing so the total count will be as well.
+```{r}
+prevSum <- data[ which(data$Index < iBreak), ]
+prevSum <- sum(prevSum$Count) #Save previous total to-date
+truncData <- data[ which(data$Index >= iBreak), ]
+truncData$Index <- truncData$Index - iBreak # Re-anchor the month index
+model <- lm(truncData$Count ~ truncData$Index)
+
+slopeTitle <- round(model[["coefficients"]][["truncData$Index"]], 2)
+interceptTitle <- round(model[["coefficients"]][["(Intercept)"]], 2)
+equation <- paste("Y=", slopeTitle, "x+", interceptTitle)
+title <- paste("Additions per Month:", equation)
+plot(truncData$Index, truncData$Count, col=truncData$color, pch=20, xlab="Re-anchored Month Index", ylab="Vulns per Month", main=title)
+abline(model, col="Red", lwd=2)
+summary(model)
+```
+
+## Regression Equations
+**Regression Equation:** $Y = m x + b$
+
+This is the equation that was used to fit the previously line on the chart. You will notice we are using the slope m, as well as the y-intercept b going forward.
+
+**Regression Integral:** $Y = 1/2 m x^{2} + b x + C$
+
+This is the integrated version of the regression equation. You will notice it still includes m and b however they have been integrated using the reverse power rule. This is the equation that will model our running total predictions.
+
+This routine accepts the previously calculated linear regression and integrates it into the second formula for running total modeling.
+```{r}
+integral <- function(slope, intercept, upperBound, lowerBound) {
+  newUpper <- upperBound - lowerBound
+  lowerBound <- 0
+  high <- .5 * slope * upperBound ^ 2 + intercept * upperBound
+  low <- .5 * slope * lowerBound ^ 2 + intercept * lowerBound
+  inte <- high - lowerBound
+  return(inte)
+}
+```
+
+## Fitted Running Total
+Below you will see that I have taken the integrated formula previously identified and overlayed it onto the running total chart. You can see here how the regression is now 2nd-order and fits the true values, at least in the recent indexes, quite well. We can now use this integral to project quantities into any month and year in the future to predict how many CVEs will exist in the NVD.
+```{r}
+truncData$PredRate <- model[["coefficients"]][["truncData$Index"]] * truncData$Index + model[["coefficients"]][["(Intercept)"]]
+truncData$PredTot <- round(integral(model[["coefficients"]][["truncData$Index"]], model[["coefficients"]][["(Intercept)"]], truncData$Index, iBreak) + prevSum, 0)
+plot(truncData$Index, truncData$Total, col=truncData$color, pch=20, xlab="Month Index", ylab="Total Vulns", main="Actual (Black) vs. Fitted Model (Red)")
+lines(truncData$Index, truncData$PredTot, pch=20, col="Red", lwd=2)
+```
+
+## Making Predictions
+This subroutine will accept a month and year with the previous model to return a total CVE count in the future.
+```{r}
+predict <- function(month, year) {
+  breakMonth <- iBreak %/% 12
+  breakYear <- iBreak / 12
+  future <- year * 12 + month
+  index <- future - iBreak
+  pred <- round(integral(model[["coefficients"]][["truncData$Index"]], model[["coefficients"]][["(Intercept)"]], index, 0) + prevSum, 0)
+  return(pred)
+}
+```
+
+```{r}
+currTotal <- tail(data$Total, n=1)
+```
+
+### How many will exist by the end of the year and what percent increase is that from today?
+```{r}
+prediction <- predict(12, 2020)
+print(prediction)
+print(prediction / currTotal * 100 - 100)
+```
+
+### How many will there be 1 year from now and what percent increase is that from today?
+```{r}
+prediction <- predict(4, 2021)
+print(prediction)
+print(prediction / currTotal * 100 - 100)
+```
+
+### How many will there be 2 years from now and what percent increase is that from today?
+```{r}
+prediction <- predict(4, 2022)
+print(prediction)
+print(prediction / currTotal * 100 - 100)
+```
+
+### How many will there be 5 years from now and what percent increase is that from today?
+```{r}
+prediction <- predict(4, 2025)
+print(prediction)
+print(prediction / currTotal * 100 - 100)
+```
